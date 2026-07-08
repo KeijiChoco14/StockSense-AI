@@ -1,9 +1,10 @@
 from pydantic_settings import BaseSettings
 
 class Settings(BaseSettings):
-    DATABASE_URL: str = "postgresql+asyncpg://stocksense_admin:supersecretpassword@localhost:5432/stocksense_ai"
+    # Ubah dari PostgreSQL ke SQLite (menggunakan aiosqlite untuk async)
+    DATABASE_URL: str = "sqlite+aiosqlite:///./stocksense.db"
     SECRET_KEY: str = "supersecretjsonwebtokenkeyforstocksenseai2026"
     ALGORITHM: str = "HS256"
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = 15
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 10080
 
 settings = Settings()
