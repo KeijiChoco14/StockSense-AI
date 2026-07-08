@@ -9,7 +9,7 @@ import random
 from schemas import TenantRegisterRequest, TenantRegisterResponse, TenantLoginRequest, TenantLoginResponse
 from schemas import IngredientCreateRequest, IngredientResponse, IngredientUpdateRequest, DashboardMetricsResponse
 from schemas import PurchaseOrderResponse, PurchaseOrderItemResponse, AuditLogResponse, RestockRequest, KitchenExpiryAlertResponse
-from schemas import UserCreateRequest, UserResponse
+from schemas import UserCreateRequest, UserResponse, MenuCreateRequest, MenuResponse, MenuIngredientResponse, POSOrderRequest
 from auth import hash_password, verify_password, create_access_token, get_current_tenant_id, get_current_user_and_tenant, RequireRole
 import json
 from datetime import datetime, timedelta
@@ -94,6 +94,24 @@ async def startup_event():
             old_data TEXT,
             new_data TEXT,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        """))
+        await conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS menus (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT NOT NULL,
+            name TEXT NOT NULL,
+            description TEXT,
+            price REAL DEFAULT 0.0,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        """))
+        await conn.execute(text("""
+        CREATE TABLE IF NOT EXISTS menu_ingredients (
+            id TEXT PRIMARY KEY,
+            menu_id TEXT NOT NULL,
+            ingredient_id TEXT NOT NULL,
+            quantity_needed REAL NOT NULL
         );
         """))
 
@@ -822,7 +840,7 @@ async def get_users(
     try:
         tenant_id = auth_data["tenant_id"]
         result = await db.execute(
-            text("SELECT id, email, full_name, role FROM users WHERE tenant_id = :tenant_id ORDER BY created_at ASC"),
+            text("SELECT id, email, full_name, role FROM users WHERE tenant_id = :tenant_id ORDER BY full_name ASC"),
             {"tenant_id": tenant_id}
         )
         users = []
@@ -998,4 +1016,227 @@ async def get_audit_logs(
             
         return response_list
     except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/menus", response_model=List[MenuResponse])
+async def get_menus(
+    db: AsyncSession = Depends(get_db),
+    tenant_id: str = Depends(get_current_tenant_id)
+):
+    try:
+        menus_result = await db.execute(
+            text("SELECT id, name, description, price FROM menus WHERE tenant_id = :tenant_id ORDER BY name"),
+            {"tenant_id": tenant_id}
+        )
+        menus = menus_result.fetchall()
+        
+        response_list = []
+        for m in menus:
+            m_id, name, desc, price = m
+            
+            # Ambil ingredients untuk menu ini
+            ing_result = await db.execute(
+                text("""
+                    SELECT mi.ingredient_id, i.name, i.sku, mi.quantity_needed, i.unit_of_measure
+                    FROM menu_ingredients mi
+                    JOIN ingredients i ON mi.ingredient_id = i.id
+                    WHERE mi.menu_id = :menu_id
+                """),
+                {"menu_id": m_id}
+            )
+            ingredients = ing_result.fetchall()
+            
+            ing_list = []
+            for ing in ingredients:
+                ing_list.append({
+                    "ingredient_id": ing[0],
+                    "ingredient_name": ing[1],
+                    "ingredient_sku": ing[2],
+                    "quantity_needed": ing[3],
+                    "unit_of_measure": ing[4]
+                })
+                
+            response_list.append({
+                "id": m_id,
+                "name": name,
+                "description": desc,
+                "price": price,
+                "ingredients": ing_list
+            })
+            
+        return response_list
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/menus", response_model=MenuResponse, status_code=status.HTTP_201_CREATED)
+async def create_menu(
+    req: MenuCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user_info: dict = Depends(get_current_user_and_tenant)
+):
+    try:
+        tenant_id = current_user_info["tenant_id"]
+        menu_id = str(uuid.uuid4())
+        
+        # Insert menu
+        await db.execute(
+            text("""
+                INSERT INTO menus (id, tenant_id, name, description, price)
+                VALUES (:id, :tenant_id, :name, :description, :price)
+            """),
+            {
+                "id": menu_id,
+                "tenant_id": tenant_id,
+                "name": req.name,
+                "description": req.description,
+                "price": req.price
+            }
+        )
+        
+        # Insert ingredients
+        ing_responses = []
+        for ing in req.ingredients:
+            mi_id = str(uuid.uuid4())
+            await db.execute(
+                text("""
+                    INSERT INTO menu_ingredients (id, menu_id, ingredient_id, quantity_needed)
+                    VALUES (:id, :menu_id, :ingredient_id, :quantity_needed)
+                """),
+                {
+                    "id": mi_id,
+                    "menu_id": menu_id,
+                    "ingredient_id": ing.ingredient_id,
+                    "quantity_needed": ing.quantity_needed
+                }
+            )
+            
+            # Fetch ingredient details for response
+            ing_detail = await db.execute(
+                text("SELECT name, sku, unit_of_measure FROM ingredients WHERE id = :id AND tenant_id = :tenant_id"),
+                {"id": ing.ingredient_id, "tenant_id": tenant_id}
+            )
+            ing_row = ing_detail.fetchone()
+            if ing_row:
+                ing_responses.append({
+                    "ingredient_id": ing.ingredient_id,
+                    "ingredient_name": ing_row[0],
+                    "ingredient_sku": ing_row[1],
+                    "quantity_needed": ing.quantity_needed,
+                    "unit_of_measure": ing_row[2]
+                })
+                
+        await db.commit()
+        
+        return {
+            "id": menu_id,
+            "name": req.name,
+            "description": req.description,
+            "price": req.price,
+            "ingredients": ing_responses
+        }
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/v1/menus/{menu_id}")
+async def delete_menu(
+    menu_id: str,
+    db: AsyncSession = Depends(get_db),
+    tenant_id: str = Depends(get_current_tenant_id)
+):
+    try:
+        await db.execute(
+            text("DELETE FROM menu_ingredients WHERE menu_id = :menu_id"),
+            {"menu_id": menu_id}
+        )
+        await db.execute(
+            text("DELETE FROM menus WHERE id = :id AND tenant_id = :tenant_id"),
+            {"id": menu_id, "tenant_id": tenant_id}
+        )
+        await db.commit()
+        return {"status": "success", "message": "Menu berhasil dihapus"}
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/v1/pos/order")
+async def pos_simulate_order(
+    req: POSOrderRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user_info: dict = Depends(get_current_user_and_tenant)
+):
+    try:
+        tenant_id = current_user_info["tenant_id"]
+        user_id = current_user_info["user_id"]
+        
+        # Ambil menu
+        menu_result = await db.execute(
+            text("SELECT name FROM menus WHERE id = :id AND tenant_id = :tenant_id"),
+            {"id": req.menu_id, "tenant_id": tenant_id}
+        )
+        menu_row = menu_result.fetchone()
+        if not menu_row:
+            raise HTTPException(status_code=404, detail="Menu tidak ditemukan")
+        menu_name = menu_row[0]
+        
+        # Ambil bahan baku
+        ing_result = await db.execute(
+            text("""
+                SELECT i.id, i.name, i.current_stock, i.unit_of_measure, mi.quantity_needed
+                FROM menu_ingredients mi
+                JOIN ingredients i ON mi.ingredient_id = i.id
+                WHERE mi.menu_id = :menu_id
+            """),
+            {"menu_id": req.menu_id}
+        )
+        ingredients = ing_result.fetchall()
+        
+        if not ingredients:
+            raise HTTPException(status_code=400, detail="Menu ini tidak memiliki resep bahan baku")
+            
+        deducted_items = []
+        
+        # Potong stok
+        for ing in ingredients:
+            ing_id, ing_name, current_stock, uom, qty_needed_per_portion = ing
+            total_deduction = qty_needed_per_portion * req.quantity
+            new_stock = current_stock - total_deduction
+            
+            await db.execute(
+                text("UPDATE ingredients SET current_stock = :new_stock WHERE id = :id"),
+                {"new_stock": new_stock, "id": ing_id}
+            )
+            
+            deducted_items.append(f"{ing_name} (-{total_deduction} {uom})")
+            
+            # Catat Audit Log
+            log_id = str(uuid.uuid4())
+            await db.execute(
+                text("""
+                    INSERT INTO audit_logs (id, tenant_id, user_id, action, entity_type, entity_id, new_data)
+                    VALUES (:id, :tenant_id, :user_id, 'UPDATE', 'INGREDIENT_POS_DEDUCT', :entity_id, :new_data)
+                """),
+                {
+                    "id": log_id,
+                    "tenant_id": tenant_id,
+                    "user_id": user_id,
+                    "entity_id": ing_id,
+                    "new_data": json.dumps({
+                        "name": ing_name,
+                        "action": f"Auto-deduction dari POS: {req.quantity}x {menu_name}. {current_stock} ➔ {new_stock} {uom}"
+                    })
+                }
+            )
+            
+        await db.commit()
+        
+        return {
+            "status": "success", 
+            "message": f"Berhasil memotong stok untuk pesanan {req.quantity}x {menu_name}",
+            "details": deducted_items
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
         raise HTTPException(status_code=500, detail=str(e))

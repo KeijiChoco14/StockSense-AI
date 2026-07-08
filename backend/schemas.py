@@ -125,3 +125,31 @@ class KitchenExpiryAlertResponse(BaseModel):
     expiry_date: str
     days_until_expiry: int
     status: str # "CRITICAL", "WARNING", "SAFE"
+
+class MenuIngredientCreate(BaseModel):
+    ingredient_id: str
+    quantity_needed: float
+
+class MenuCreateRequest(BaseModel):
+    name: str
+    description: str | None = None
+    price: float = 0.0
+    ingredients: list[MenuIngredientCreate]
+
+class MenuIngredientResponse(BaseModel):
+    ingredient_id: str
+    ingredient_name: str
+    ingredient_sku: str
+    quantity_needed: float
+    unit_of_measure: str
+
+class MenuResponse(BaseModel):
+    id: str
+    name: str
+    description: str | None
+    price: float
+    ingredients: list[MenuIngredientResponse]
+
+class POSOrderRequest(BaseModel):
+    menu_id: str
+    quantity: int
